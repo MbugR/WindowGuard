@@ -16,9 +16,9 @@ class MonitorLock
     static extern IntPtr SetWinEventHook(uint eMin, uint eMax, IntPtr hMod,
         WinEventProc proc, uint pid, uint tid, uint flags);
 
-    [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern int  GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr ins,
@@ -27,10 +27,8 @@ class MonitorLock
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWndProc proc, IntPtr lp);
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
-    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
-    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -62,39 +60,35 @@ class MonitorLock
         public uint dwFlags;
     }
 
-    const uint EVENT_OBJECT_HIDE           = 0x8001;
     const uint EVENT_OBJECT_SHOW           = 0x8002;
     const uint EVENT_SYSTEM_MOVESIZESTART  = 0x000A;
     const uint EVENT_SYSTEM_MOVESIZEEND    = 0x000B;
-    const uint EVENT_SYSTEM_MINIMIZESTART  = 0x0016;
-    const uint WINEVENT_OUTOFCONTEXT      = 0;
-    const uint WINEVENT_SKIPOWNPROCESS    = 2;
-    const int  GWL_STYLE                  = -16;
-    const int  GWL_EXSTYLE                = -20;
-    const int  WS_CAPTION                 = 0x00C00000;
-    const int  WS_EX_TOOLWINDOW           = 0x00000080;
-    const uint MONITOR_DEFAULTTOPRIMARY   = 1;
-    const uint MONITOR_DEFAULTTONEAREST   = 2;
-    const uint SWP_NOSIZE                 = 0x0001;
+    const uint WINEVENT_OUTOFCONTEXT       = 0;
+    const uint WINEVENT_SKIPOWNPROCESS     = 2;
+    const int  GWL_STYLE                   = -16;
+    const int  GWL_EXSTYLE                 = -20;
+    const int  WS_CAPTION                  = 0x00C00000;
+    const int  WS_EX_TOOLWINDOW            = 0x00000080;
+    const uint MONITOR_DEFAULTTOPRIMARY    = 1;
+    const uint MONITOR_DEFAULTTONEAREST    = 2;
+    const uint SWP_NOSIZE                  = 0x0001;
     const uint SWP_NOZORDER               = 0x0004;
     const uint SWP_NOACTIVATE             = 0x0010;
+    const uint SWP_NOSENDCHANGING         = 0x0400; // не посылать WM_WINDOWPOSCHANGING
     const uint RDW_INVALIDATE             = 0x0001;
     const uint RDW_UPDATENOW              = 0x0100;
     const uint RDW_ALLCHILDREN            = 0x0080;
-    const int  SW_RESTORE                 = 9;
+
+    // Задержка перед переносом нового окна (мс)
+    const int NEW_WINDOW_DELAY_MS = 300;
 
     #endregion
 
     static IntPtr _primary;
-    static readonly Dictionary<IntPtr, IntPtr>  _approved   = new Dictionary<IntPtr, IntPtr>();
-    static readonly HashSet<IntPtr>             _dragging   = new HashSet<IntPtr>();
-    // Новые окна: ждём перед переносом, чтобы приложение успело инициализироваться
-    static readonly Dictionary<IntPtr, DateTime> _pendingNew     = new Dictionary<IntPtr, DateTime>();
-    const int NEW_WINDOW_DELAY_MS = 1000;
-    // После переноса: ждём и восстанавливаем окно если оно само свернулось
-    static readonly Dictionary<IntPtr, DateTime> _pendingRestore = new Dictionary<IntPtr, DateTime>();
-    // Окна перемещённые нами (в течение 3 сек): если свернутся — восстановим
-    static readonly Dictionary<IntPtr, DateTime> _recentlyMoved  = new Dictionary<IntPtr, DateTime>();
+    static readonly Dictionary<IntPtr, IntPtr>   _approved   = new Dictionary<IntPtr, IntPtr>();
+    static readonly HashSet<IntPtr>              _dragging   = new HashSet<IntPtr>();
+    // Новые окна ждут переноса — даём приложению время инициализироваться
+    static readonly Dictionary<IntPtr, DateTime> _pendingNew = new Dictionary<IntPtr, DateTime>();
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -107,11 +101,9 @@ class MonitorLock
 
         _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
 
-        Hook(EVENT_OBJECT_HIDE,          EVENT_OBJECT_HIDE,          OnHide);
         Hook(EVENT_OBJECT_SHOW,          EVENT_OBJECT_SHOW,          OnShow);
         Hook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, OnDragStart);
         Hook(EVENT_SYSTEM_MOVESIZEEND,   EVENT_SYSTEM_MOVESIZEEND,   OnDragEnd);
-        Hook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, OnMinimizeStart);
 
         // Запомнить уже открытые окна — не трогать их, просто зафиксировать текущий монитор
         EnumWindows((h, lp) =>
@@ -179,18 +171,7 @@ class MonitorLock
         return true;
     }
 
-    // Окно скрылось (SW_HIDE / уход в трей) — если мы его недавно перемещали, вернём обратно
-    static void OnHide(IntPtr hook, uint evType, IntPtr hwnd,
-        int obj, int child, uint tid, uint time)
-    {
-        if (obj != 0 || child != 0) return;
-        DateTime movedAt;
-        if (_recentlyMoved.TryGetValue(hwnd, out movedAt))
-            if ((DateTime.UtcNow - movedAt).TotalMilliseconds < 3000)
-                _pendingRestore[hwnd] = DateTime.UtcNow;
-    }
-
-    // Новое окно появилось — зафиксировать и поставить в очередь отложенного переноса
+    // Новое окно появилось — зафиксировать и поставить в очередь переноса
     static void OnShow(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
     {
@@ -199,19 +180,8 @@ class MonitorLock
 
         _approved[hwnd] = _primary;
 
-        // Не трогаем сразу — даём 150мс на инициализацию рендеринга
         if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != _primary)
             _pendingNew[hwnd] = DateTime.UtcNow;
-    }
-
-    // Окно начало сворачиваться — если мы его недавно перемещали, восстановим через 80мс
-    static void OnMinimizeStart(IntPtr hook, uint evType, IntPtr hwnd,
-        int obj, int child, uint tid, uint time)
-    {
-        DateTime movedAt;
-        if (_recentlyMoved.TryGetValue(hwnd, out movedAt))
-            if ((DateTime.UtcNow - movedAt).TotalMilliseconds < 3000)
-                _pendingRestore[hwnd] = DateTime.UtcNow;
     }
 
     // Пользователь начал тащить окно
@@ -234,29 +204,7 @@ class MonitorLock
     {
         var now = DateTime.UtcNow;
 
-        // Восстановить окна, которые свернулись после нашего переноса
-        var restoreReady = new List<IntPtr>();
-        foreach (var kv in _pendingRestore)
-            if ((now - kv.Value).TotalMilliseconds >= 80)
-                restoreReady.Add(kv.Key);
-        foreach (var h in restoreReady)
-        {
-            _pendingRestore.Remove(h);
-            if (!IsWindow(h)) continue;
-            // Восстанавливаем если окно свёрнуто ИЛИ скрыто (ушло в трей)
-            if (IsIconic(h) || !IsWindowVisible(h))
-                ShowWindow(h, SW_RESTORE);
-        }
-
-        // Очистить устаревшие записи _recentlyMoved (старше 3 сек)
-        var oldMoved = new List<IntPtr>();
-        foreach (var kv in _recentlyMoved)
-            if ((now - kv.Value).TotalMilliseconds >= 3000)
-                oldMoved.Add(kv.Key);
-        foreach (var h in oldMoved)
-            _recentlyMoved.Remove(h);
-
-        // Обработать отложенные новые окна (ждём NEW_WINDOW_DELAY_MS после появления)
+        // Обработать отложенные новые окна
         var ready = new List<IntPtr>();
         foreach (var kv in _pendingNew)
             if ((now - kv.Value).TotalMilliseconds >= NEW_WINDOW_DELAY_MS)
@@ -264,26 +212,32 @@ class MonitorLock
         foreach (var h in ready)
         {
             _pendingNew.Remove(h);
+            if (!IsWindow(h)) continue;
             if (IsReal(h) && MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) != _primary)
                 PutOn(h, _primary);
         }
 
-        // Проверить все известные окна
+        // Проверить все известные окна на несанкционированное перемещение
         var dead = new List<IntPtr>();
         foreach (var kv in _approved)
         {
             IntPtr hwnd = kv.Key;
 
-            if (!IsWindowVisible(hwnd))   { dead.Add(hwnd); continue; }
-            if (_dragging.Contains(hwnd)) continue;
+            if (!IsWindowVisible(hwnd))        { dead.Add(hwnd); continue; }
+            if (_dragging.Contains(hwnd))      continue;
             if (_pendingNew.ContainsKey(hwnd)) continue;
-            if (IsIconic(hwnd))           continue;
+            if (IsIconic(hwnd))                continue;
 
             if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != kv.Value)
                 PutOn(hwnd, kv.Value);
         }
 
-        foreach (var h in dead) { _approved.Remove(h); _dragging.Remove(h); _pendingNew.Remove(h); }
+        foreach (var h in dead)
+        {
+            _approved.Remove(h);
+            _dragging.Remove(h);
+            _pendingNew.Remove(h);
+        }
     }
 
     // Переместить окно по центру указанного монитора
@@ -303,8 +257,7 @@ class MonitorLock
         int x = mi.rcWork.Left + Math.Max(0, (areaW - w) / 2);
         int y = mi.rcWork.Top  + Math.Max(0, (areaH - h) / 2);
 
-        // SetWindowPlacement обновляет rcNormalPosition — позицию восстановления из свёрнутого.
-        // Без этого окно после сворачивания/разворачивания возвращалось на старый монитор.
+        // SetWindowPlacement обновляет rcNormalPosition — позицию восстановления из свёрнутого
         var wp = new WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
         if (GetWindowPlacement(hwnd, ref wp))
         {
@@ -312,21 +265,16 @@ class MonitorLock
             SetWindowPlacement(hwnd, ref wp);
         }
 
-        // SetWindowPos перемещает визуально прямо сейчас (если окно не свёрнуто)
+        // SWP_NOSENDCHANGING подавляет WM_WINDOWPOSCHANGING — сообщение через которое
+        // некоторые приложения (Telegram и др.) обнаруживают программный перенос
         if (!IsIconic(hwnd))
         {
             SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 
-            // Принудительная перерисовка — некоторые приложения не обновляются сами
             RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
                 RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
         }
-
-        // Запомнить что мы только что переместили это окно.
-        // Если оно свернётся (EVENT_SYSTEM_MINIMIZESTART) — восстановим его
-        _recentlyMoved[hwnd]  = DateTime.UtcNow;
-        _pendingRestore[hwnd] = DateTime.UtcNow;
     }
 
     const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
