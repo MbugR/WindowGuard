@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -95,6 +96,15 @@ class MonitorLock
     [STAThread]
     static void Main()
     {
+        bool createdNew;
+        var mutex = new Mutex(true, "MonitorLock_SingleInstance", out createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show("MonitorLock уже запущен.", "MonitorLock",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         Application.EnableVisualStyles();
 
         SyncAutostartPath();
@@ -152,6 +162,7 @@ class MonitorLock
 
         Application.Run();
         tray.Visible = false;
+        mutex.ReleaseMutex();
     }
 
     static void Hook(uint eMin, uint eMax, WinEventProc proc)
