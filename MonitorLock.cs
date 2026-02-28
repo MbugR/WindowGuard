@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 class MonitorLock
 {
@@ -89,6 +90,17 @@ class MonitorLock
         // Трей
         var menu = new ContextMenuStrip();
         menu.Items.Add("MonitorLock  —  активен", null, null).Enabled = false;
+        menu.Items.Add("-");
+
+        var autoStartItem = new ToolStripMenuItem("Автозапуск с Windows");
+        autoStartItem.Checked = IsAutostart();
+        autoStartItem.Click += (s, e) =>
+        {
+            SetAutostart(!autoStartItem.Checked);
+            autoStartItem.Checked = IsAutostart();
+        };
+        menu.Items.Add(autoStartItem);
+
         menu.Items.Add("-");
         menu.Items.Add("Выход", null, (s, e) => Application.Exit());
 
@@ -196,5 +208,26 @@ class MonitorLock
 
         SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string APP_NAME = "MonitorLock";
+
+    static bool IsAutostart()
+    {
+        using (var key = Registry.CurrentUser.OpenSubKey(RUN_KEY, false))
+            return key != null && key.GetValue(APP_NAME) != null;
+    }
+
+    static void SetAutostart(bool enable)
+    {
+        using (var key = Registry.CurrentUser.OpenSubKey(RUN_KEY, true))
+        {
+            if (key == null) return;
+            if (enable)
+                key.SetValue(APP_NAME, Application.ExecutablePath);
+            else
+                key.DeleteValue(APP_NAME, false);
+        }
     }
 }
