@@ -30,6 +30,7 @@ class WindowGuard
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -76,6 +77,8 @@ class WindowGuard
     const uint SWP_NOZORDER               = 0x0004;
     const uint SWP_NOACTIVATE             = 0x0010;
     const uint SWP_NOSENDCHANGING         = 0x0400; // не посылать WM_WINDOWPOSCHANGING
+    const int  VK_LWIN                    = 0x5B;
+    const int  VK_RWIN                    = 0x5C;
     const uint RDW_INVALIDATE             = 0x0001;
     const uint RDW_UPDATENOW              = 0x0100;
     const uint RDW_ALLCHILDREN            = 0x0080;
@@ -228,6 +231,10 @@ class WindowGuard
                 PutOn(h, _primary);
         }
 
+        // Win-клавиша зажата — пользователь использует Win+Shift+Arrow
+        bool winKey = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                      (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
         // Проверить все известные окна на несанкционированное перемещение
         var dead = new List<IntPtr>();
         foreach (var kv in _approved)
@@ -239,8 +246,15 @@ class WindowGuard
             if (_pendingNew.ContainsKey(hwnd)) continue;
             if (IsIconic(hwnd))                continue;
 
-            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != kv.Value)
-                PutOn(hwnd, kv.Value);
+            var current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (current != kv.Value)
+            {
+                if (winKey)
+                    // Пользователь переместил клавиатурой — принять новую позицию
+                    _approved[hwnd] = current;
+                else
+                    PutOn(hwnd, kv.Value);
+            }
         }
 
         foreach (var h in dead)
