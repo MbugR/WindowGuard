@@ -123,7 +123,7 @@ class MonitorLock
             return true;
         }, IntPtr.Zero);
 
-        var timer = new Timer { Interval = 200 };
+        var timer = new System.Windows.Forms.Timer { Interval = 200 };
         timer.Tick += (s, e) => CheckAll();
         timer.Start();
 
