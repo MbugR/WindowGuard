@@ -101,6 +101,10 @@ class WindowGuard
     // Окна, которые WG недавно переместил — следим, не скрылись ли они в ответ
     static readonly Dictionary<IntPtr, DateTime> _wgMoved   = new Dictionary<IntPtr, DateTime>();
     const int WG_MOVED_GRACE_MS = 1500;
+    // Время последнего изменения конфигурации мониторов (DisplayChange / Resume)
+    static DateTime _displayChangedAt = DateTime.MinValue;
+    const int DISPLAY_SETTLE_MS = 4000;
+    static bool _paused = false; // ждём пока монитор полностью инициализируется
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -121,6 +125,12 @@ class WindowGuard
         SyncAutostartPath();
 
         _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
+
+        SystemEvents.DisplaySettingsChanged += (s, e) => { _displayChangedAt = DateTime.UtcNow; };
+        SystemEvents.PowerModeChanged      += (s, e) => {
+            if (((PowerModeChangedEventArgs)e).Mode == PowerModes.Resume)
+                _displayChangedAt = DateTime.UtcNow;
+        };
 
         Hook(EVENT_OBJECT_SHOW,           EVENT_OBJECT_SHOW,           OnShow);
         Hook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, OnLocationChange);
@@ -152,6 +162,12 @@ class WindowGuard
             autoStartItem.Checked = IsAutostart();
         };
         menu.Items.Add(autoStartItem);
+
+        menu.Items.Add("Перенести все на основной монитор", null, (s, e) => MoveAllToPrimary());
+
+        var pauseItem = new ToolStripMenuItem("Остановить") { CheckOnClick = true };
+        pauseItem.CheckedChanged += (s, e) => _paused = pauseItem.Checked;
+        menu.Items.Add(pauseItem);
 
         menu.Items.Add("-");
         menu.Items.Add("Выход", null, (s, e) => Application.Exit());
@@ -198,6 +214,7 @@ class WindowGuard
     static void OnShow(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
     {
+        if (_paused) return;
         if (obj != 0 || child != 0) return;
         if (!IsReal(hwnd)) return;
 
@@ -211,6 +228,7 @@ class WindowGuard
     static void OnLocationChange(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
     {
+        if (_paused) return;
         if (obj != 0 || child != 0) return;
         if (!_approved.ContainsKey(hwnd)) return;
         if (_dragging.Contains(hwnd)) return;
@@ -244,10 +262,28 @@ class WindowGuard
         _approved[hwnd] = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     }
 
+    // Перенести все отслеживаемые окна на основной монитор
+    static void MoveAllToPrimary()
+    {
+        _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
+        var keys = new List<IntPtr>(_approved.Keys);
+        foreach (var h in keys)
+            _approved[h] = _primary;
+    }
+
     // Каждые 200 мс проверить все окна
     static void CheckAll()
     {
+        if (_paused) return;
         var now = DateTime.UtcNow;
+
+        // Монитор вернулся после отключения/сна — ждём пока инициализируется, потом возвращаем окна
+        if (_displayChangedAt != DateTime.MinValue &&
+            (now - _displayChangedAt).TotalMilliseconds >= DISPLAY_SETTLE_MS)
+        {
+            _displayChangedAt = DateTime.MinValue;
+            MoveAllToPrimary();
+        }
 
         // Обработать отложенные новые окна
         var ready = new List<IntPtr>();
