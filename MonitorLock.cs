@@ -88,8 +88,9 @@ class MonitorLock
     static IntPtr _primary;
     static readonly Dictionary<IntPtr, IntPtr>  _approved   = new Dictionary<IntPtr, IntPtr>();
     static readonly HashSet<IntPtr>             _dragging   = new HashSet<IntPtr>();
-    // Новые окна: ждём 150мс перед переносом, чтобы приложение успело инициализироваться
+    // Новые окна: ждём перед переносом, чтобы приложение успело инициализироваться
     static readonly Dictionary<IntPtr, DateTime> _pendingNew     = new Dictionary<IntPtr, DateTime>();
+    const int NEW_WINDOW_DELAY_MS = 1000;
     // После переноса: ждём и восстанавливаем окно если оно само свернулось
     static readonly Dictionary<IntPtr, DateTime> _pendingRestore = new Dictionary<IntPtr, DateTime>();
     // Окна перемещённые нами (в течение 3 сек): если свернутся — восстановим
@@ -255,10 +256,10 @@ class MonitorLock
         foreach (var h in oldMoved)
             _recentlyMoved.Remove(h);
 
-        // Обработать отложенные новые окна (ждём 150мс после появления)
+        // Обработать отложенные новые окна (ждём NEW_WINDOW_DELAY_MS после появления)
         var ready = new List<IntPtr>();
         foreach (var kv in _pendingNew)
-            if ((now - kv.Value).TotalMilliseconds >= 150)
+            if ((now - kv.Value).TotalMilliseconds >= NEW_WINDOW_DELAY_MS)
                 ready.Add(kv.Key);
         foreach (var h in ready)
         {
