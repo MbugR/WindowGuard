@@ -69,6 +69,8 @@ class MonitorLock
     {
         Application.EnableVisualStyles();
 
+        SyncAutostartPath();
+
         _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
 
         Hook(EVENT_OBJECT_SHOW,          EVENT_OBJECT_SHOW,          OnShow);
@@ -228,6 +230,18 @@ class MonitorLock
                 key.SetValue(APP_NAME, Application.ExecutablePath);
             else
                 key.DeleteValue(APP_NAME, false);
+        }
+    }
+
+    // Если автозапуск включён, но путь устарел (файл переместили) — обновить
+    static void SyncAutostartPath()
+    {
+        using (var key = Registry.CurrentUser.OpenSubKey(RUN_KEY, true))
+        {
+            if (key == null) return;
+            var stored = key.GetValue(APP_NAME) as string;
+            if (stored != null && stored != Application.ExecutablePath)
+                key.SetValue(APP_NAME, Application.ExecutablePath);
         }
     }
 }
