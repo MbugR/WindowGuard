@@ -13,24 +13,24 @@ if not exist "%CSC%" (
 )
 
 :: Закрываем запущенный процесс если есть
-taskkill /f /im MonitorLock.exe >nul 2>&1
+taskkill /f /im WindowGuard.exe >nul 2>&1
 
 :: Генерируем иконку через PowerShell (системный щит)
 echo Создаю иконку ...
 powershell -NoProfile -Command ^
-  "Add-Type -AssemblyName System.Drawing; $ico = [System.Drawing.SystemIcons]::Shield; $s = [System.IO.File]::OpenWrite('%~dp0MonitorLock.ico'); $ico.Save($s); $s.Close()"
+  "Add-Type -AssemblyName System.Drawing; $ico = [System.Drawing.SystemIcons]::Shield; $s = [System.IO.File]::OpenWrite('%~dp0WindowGuard.ico'); $ico.Save($s); $s.Close()"
 
-echo Компилирую MonitorLock.cs ...
-"%CSC%" /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll /win32icon:"%~dp0MonitorLock.ico" /out:"%~dp0MonitorLock.exe" "%~dp0MonitorLock.cs"
+echo Компилирую WindowGuard.cs ...
+"%CSC%" /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll /win32icon:"%~dp0WindowGuard.ico" /out:"%~dp0WindowGuard.exe" "%~dp0WindowGuard.cs"
 
 if %ERRORLEVEL%==0 (
     echo.
-    echo  OK! MonitorLock.exe создан.
+    echo  OK! WindowGuard.exe создан.
     echo  Запустите его — появится иконка в трее ^(системный лоток^).
     echo  Правой кнопкой по иконке — Выход.
     timeout /t 3 /nobreak >nul
 ) else (
     echo.
-    echo  ОШИБКА компиляции. Проверьте MonitorLock.cs.
+    echo  ОШИБКА компиляции. Проверьте WindowGuard.cs.
     pause
 )

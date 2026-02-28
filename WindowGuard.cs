@@ -6,7 +6,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-class MonitorLock
+class WindowGuard
 {
     #region P/Invoke
 
@@ -97,10 +97,10 @@ class MonitorLock
     static void Main()
     {
         bool createdNew;
-        var mutex = new Mutex(true, "MonitorLock_SingleInstance", out createdNew);
+        var mutex = new Mutex(true, "WindowGuard_SingleInstance", out createdNew);
         if (!createdNew)
         {
-            MessageBox.Show("MonitorLock уже запущен.", "MonitorLock",
+            MessageBox.Show("WindowGuard уже запущен.", "WindowGuard",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -129,7 +129,7 @@ class MonitorLock
 
         // Трей
         var menu = new ContextMenuStrip();
-        menu.Items.Add("MonitorLock  —  активен", null, null).Enabled = false;
+        menu.Items.Add("WindowGuard  —  активен", null, null).Enabled = false;
         menu.Items.Add("-");
 
         var autoStartItem = new ToolStripMenuItem("Автозапуск с Windows");
@@ -146,19 +146,19 @@ class MonitorLock
 
         var tray = new NotifyIcon
         {
-            Text             = "MonitorLock",
+            Text             = "WindowGuard",
             Icon             = SystemIcons.Shield,
             Visible          = true,
             ContextMenuStrip = menu
         };
         tray.DoubleClick += (s, e) =>
             MessageBox.Show(
-                "MonitorLock работает.\n\n" +
+                "WindowGuard работает.\n\n" +
                 "• Новые окна открываются на основном мониторе.\n" +
                 "• Программные перемещения отменяются.\n" +
                 "• Ручное перетаскивание разрешено.\n\n" +
                 "Правой кнопкой по иконке → Выход.",
-                "MonitorLock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "WindowGuard", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
         Application.Run();
         tray.Visible = false;
@@ -289,7 +289,7 @@ class MonitorLock
     }
 
     const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string APP_NAME = "MonitorLock";
+    const string APP_NAME = "WindowGuard";
 
     static bool IsAutostart()
     {
