@@ -236,7 +236,8 @@ class WindowGuard
                       (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
 
         // Проверить все известные окна на несанкционированное перемещение
-        var dead = new List<IntPtr>();
+        var dead    = new List<IntPtr>();
+        var reapprove = new Dictionary<IntPtr, IntPtr>(); // окна принятые как пользовательский перенос
         foreach (var kv in _approved)
         {
             IntPtr hwnd = kv.Key;
@@ -250,13 +251,13 @@ class WindowGuard
             if (current != kv.Value)
             {
                 if (winKey)
-                    // Пользователь переместил клавиатурой — принять новую позицию
-                    _approved[hwnd] = current;
+                    reapprove[hwnd] = current;
                 else
                     PutOn(hwnd, kv.Value);
             }
         }
 
+        foreach (var kv in reapprove) _approved[kv.Key] = kv.Value;
         foreach (var h in dead)
         {
             _approved.Remove(h);
