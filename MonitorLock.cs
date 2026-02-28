@@ -30,6 +30,7 @@ class MonitorLock
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -61,6 +62,7 @@ class MonitorLock
         public uint dwFlags;
     }
 
+    const uint EVENT_OBJECT_HIDE           = 0x8001;
     const uint EVENT_OBJECT_SHOW           = 0x8002;
     const uint EVENT_SYSTEM_MOVESIZESTART  = 0x000A;
     const uint EVENT_SYSTEM_MOVESIZEEND    = 0x000B;
@@ -104,6 +106,7 @@ class MonitorLock
 
         _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
 
+        Hook(EVENT_OBJECT_HIDE,          EVENT_OBJECT_HIDE,          OnHide);
         Hook(EVENT_OBJECT_SHOW,          EVENT_OBJECT_SHOW,          OnShow);
         Hook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, OnDragStart);
         Hook(EVENT_SYSTEM_MOVESIZEEND,   EVENT_SYSTEM_MOVESIZEEND,   OnDragEnd);
@@ -175,6 +178,17 @@ class MonitorLock
         return true;
     }
 
+    // Окно скрылось (SW_HIDE / уход в трей) — если мы его недавно перемещали, вернём обратно
+    static void OnHide(IntPtr hook, uint evType, IntPtr hwnd,
+        int obj, int child, uint tid, uint time)
+    {
+        if (obj != 0 || child != 0) return;
+        DateTime movedAt;
+        if (_recentlyMoved.TryGetValue(hwnd, out movedAt))
+            if ((DateTime.UtcNow - movedAt).TotalMilliseconds < 3000)
+                _pendingRestore[hwnd] = DateTime.UtcNow;
+    }
+
     // Новое окно появилось — зафиксировать и поставить в очередь отложенного переноса
     static void OnShow(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
@@ -227,7 +241,9 @@ class MonitorLock
         foreach (var h in restoreReady)
         {
             _pendingRestore.Remove(h);
-            if (IsWindowVisible(h) && IsIconic(h))
+            if (!IsWindow(h)) continue;
+            // Восстанавливаем если окно свёрнуто ИЛИ скрыто (ушло в трей)
+            if (IsIconic(h) || !IsWindowVisible(h))
                 ShowWindow(h, SW_RESTORE);
         }
 
