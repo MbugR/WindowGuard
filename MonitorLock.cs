@@ -27,6 +27,7 @@ class MonitorLock
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWndProc proc, IntPtr lp);
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -59,6 +60,7 @@ class MonitorLock
     const uint RDW_INVALIDATE             = 0x0001;
     const uint RDW_UPDATENOW              = 0x0100;
     const uint RDW_ALLCHILDREN            = 0x0080;
+    const int  SW_RESTORE                 = 9;
 
     #endregion
 
@@ -66,7 +68,9 @@ class MonitorLock
     static readonly Dictionary<IntPtr, IntPtr>  _approved   = new Dictionary<IntPtr, IntPtr>();
     static readonly HashSet<IntPtr>             _dragging   = new HashSet<IntPtr>();
     // Новые окна: ждём 150мс перед переносом, чтобы приложение успело инициализироваться
-    static readonly Dictionary<IntPtr, DateTime> _pendingNew = new Dictionary<IntPtr, DateTime>();
+    static readonly Dictionary<IntPtr, DateTime> _pendingNew     = new Dictionary<IntPtr, DateTime>();
+    // После переноса: ждём 100мс и восстанавливаем окно если оно само свернулось
+    static readonly Dictionary<IntPtr, DateTime> _pendingRestore = new Dictionary<IntPtr, DateTime>();
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -181,8 +185,21 @@ class MonitorLock
     // Каждые 200 мс проверить все окна
     static void CheckAll()
     {
-        // Обработать отложенные новые окна (ждём 150мс после появления)
         var now = DateTime.UtcNow;
+
+        // Проверить окна, которые могли свернуться после нашего переноса
+        var restoreReady = new List<IntPtr>();
+        foreach (var kv in _pendingRestore)
+            if ((now - kv.Value).TotalMilliseconds >= 100)
+                restoreReady.Add(kv.Key);
+        foreach (var h in restoreReady)
+        {
+            _pendingRestore.Remove(h);
+            if (IsWindowVisible(h) && IsIconic(h))
+                ShowWindow(h, SW_RESTORE);
+        }
+
+        // Обработать отложенные новые окна (ждём 150мс после появления)
         var ready = new List<IntPtr>();
         foreach (var kv in _pendingNew)
             if ((now - kv.Value).TotalMilliseconds >= 150)
@@ -235,6 +252,10 @@ class MonitorLock
         // Принудительная перерисовка — некоторые приложения не обновляются сами
         RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
             RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
+        // Некоторые приложения (Telegram и др.) сворачиваются в ответ на SetWindowPos —
+        // ставим в очередь восстановления: через 100мс проверим и развернём если надо
+        _pendingRestore[hwnd] = DateTime.UtcNow;
     }
 
     const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
