@@ -169,6 +169,12 @@ class WindowGuard
         pauseItem.CheckedChanged += (s, e) => _paused = pauseItem.Checked;
         menu.Items.Add(pauseItem);
 
+        menu.Items.Add("Перезапустить проводник", null, (s, e) =>
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("explorer"))
+                p.Kill();
+            System.Diagnostics.Process.Start("explorer.exe");
+        });
         menu.Items.Add("-");
         menu.Items.Add("Выход", null, (s, e) => Application.Exit());
 
