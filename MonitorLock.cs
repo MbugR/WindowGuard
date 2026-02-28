@@ -26,6 +26,7 @@ class MonitorLock
     [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint dfl);
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWndProc proc, IntPtr lp);
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -55,12 +56,17 @@ class MonitorLock
     const uint SWP_NOSIZE                 = 0x0001;
     const uint SWP_NOZORDER               = 0x0004;
     const uint SWP_NOACTIVATE             = 0x0010;
+    const uint RDW_INVALIDATE             = 0x0001;
+    const uint RDW_UPDATENOW              = 0x0100;
+    const uint RDW_ALLCHILDREN            = 0x0080;
 
     #endregion
 
     static IntPtr _primary;
-    static readonly Dictionary<IntPtr, IntPtr> _approved = new Dictionary<IntPtr, IntPtr>();
-    static readonly HashSet<IntPtr>            _dragging = new HashSet<IntPtr>();
+    static readonly Dictionary<IntPtr, IntPtr>  _approved   = new Dictionary<IntPtr, IntPtr>();
+    static readonly HashSet<IntPtr>             _dragging   = new HashSet<IntPtr>();
+    // Новые окна: ждём 150мс перед переносом, чтобы приложение успело инициализироваться
+    static readonly Dictionary<IntPtr, DateTime> _pendingNew = new Dictionary<IntPtr, DateTime>();
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -85,7 +91,7 @@ class MonitorLock
             return true;
         }, IntPtr.Zero);
 
-        var timer = new Timer { Interval = 500 };
+        var timer = new Timer { Interval = 200 };
         timer.Tick += (s, e) => CheckAll();
         timer.Start();
 
@@ -143,17 +149,18 @@ class MonitorLock
         return true;
     }
 
-    // Новое окно появилось — переместить на основной монитор
+    // Новое окно появилось — зафиксировать и поставить в очередь отложенного переноса
     static void OnShow(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
     {
         if (obj != 0 || child != 0) return;
         if (!IsReal(hwnd)) return;
 
-        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != _primary)
-            PutOn(hwnd, _primary);
-
         _approved[hwnd] = _primary;
+
+        // Не трогаем сразу — даём 150мс на инициализацию рендеринга
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != _primary)
+            _pendingNew[hwnd] = DateTime.UtcNow;
     }
 
     // Пользователь начал тащить окно
@@ -171,24 +178,38 @@ class MonitorLock
         _approved[hwnd] = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     }
 
-    // Каждые 500 мс проверить все окна
+    // Каждые 200 мс проверить все окна
     static void CheckAll()
     {
-        var dead = new List<IntPtr>();
+        // Обработать отложенные новые окна (ждём 150мс после появления)
+        var now = DateTime.UtcNow;
+        var ready = new List<IntPtr>();
+        foreach (var kv in _pendingNew)
+            if ((now - kv.Value).TotalMilliseconds >= 150)
+                ready.Add(kv.Key);
+        foreach (var h in ready)
+        {
+            _pendingNew.Remove(h);
+            if (IsReal(h) && MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) != _primary)
+                PutOn(h, _primary);
+        }
 
+        // Проверить все известные окна
+        var dead = new List<IntPtr>();
         foreach (var kv in _approved)
         {
             IntPtr hwnd = kv.Key;
 
             if (!IsWindowVisible(hwnd))   { dead.Add(hwnd); continue; }
             if (_dragging.Contains(hwnd)) continue;
+            if (_pendingNew.ContainsKey(hwnd)) continue;
             if (IsIconic(hwnd))           continue;
 
             if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != kv.Value)
                 PutOn(hwnd, kv.Value);
         }
 
-        foreach (var h in dead) { _approved.Remove(h); _dragging.Remove(h); }
+        foreach (var h in dead) { _approved.Remove(h); _dragging.Remove(h); _pendingNew.Remove(h); }
     }
 
     // Переместить окно по центру указанного монитора
@@ -210,6 +231,10 @@ class MonitorLock
 
         SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+        // Принудительная перерисовка — некоторые приложения не обновляются сами
+        RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
     const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
