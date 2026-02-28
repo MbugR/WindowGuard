@@ -28,11 +28,29 @@ class MonitorLock
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWndProc proc, IntPtr lp);
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
+    [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    // Хранит текущее состояние окна включая rcNormalPosition —
+    // координаты куда окно возвращается при разворачивании из свёрнутого
+    [StructLayout(LayoutKind.Sequential)]
+    struct WINDOWPLACEMENT
+    {
+        public int   length;
+        public int   flags;
+        public int   showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT  rcNormalPosition;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct MONITORINFO
@@ -268,12 +286,25 @@ class MonitorLock
         int x = mi.rcWork.Left + Math.Max(0, (areaW - w) / 2);
         int y = mi.rcWork.Top  + Math.Max(0, (areaH - h) / 2);
 
-        SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // SetWindowPlacement обновляет rcNormalPosition — позицию восстановления из свёрнутого.
+        // Без этого окно после сворачивания/разворачивания возвращалось на старый монитор.
+        var wp = new WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
+        if (GetWindowPlacement(hwnd, ref wp))
+        {
+            wp.rcNormalPosition = new RECT { Left = x, Top = y, Right = x + w, Bottom = y + h };
+            SetWindowPlacement(hwnd, ref wp);
+        }
 
-        // Принудительная перерисовка — некоторые приложения не обновляются сами
-        RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
-            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        // SetWindowPos перемещает визуально прямо сейчас (если окно не свёрнуто)
+        if (!IsIconic(hwnd))
+        {
+            SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+            // Принудительная перерисовка — некоторые приложения не обновляются сами
+            RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
+                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        }
 
         // Запомнить что мы только что переместили это окно.
         // Если оно свернётся (EVENT_SYSTEM_MINIMIZESTART) — восстановим его
