@@ -43,9 +43,10 @@ class MonitorLock
         public uint dwFlags;
     }
 
-    const uint EVENT_OBJECT_SHOW          = 0x8002;
-    const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A;
-    const uint EVENT_SYSTEM_MOVESIZEEND   = 0x000B;
+    const uint EVENT_OBJECT_SHOW           = 0x8002;
+    const uint EVENT_SYSTEM_MOVESIZESTART  = 0x000A;
+    const uint EVENT_SYSTEM_MOVESIZEEND    = 0x000B;
+    const uint EVENT_SYSTEM_MINIMIZESTART  = 0x0016;
     const uint WINEVENT_OUTOFCONTEXT      = 0;
     const uint WINEVENT_SKIPOWNPROCESS    = 2;
     const int  GWL_STYLE                  = -16;
@@ -69,8 +70,10 @@ class MonitorLock
     static readonly HashSet<IntPtr>             _dragging   = new HashSet<IntPtr>();
     // Новые окна: ждём 150мс перед переносом, чтобы приложение успело инициализироваться
     static readonly Dictionary<IntPtr, DateTime> _pendingNew     = new Dictionary<IntPtr, DateTime>();
-    // После переноса: ждём 100мс и восстанавливаем окно если оно само свернулось
+    // После переноса: ждём и восстанавливаем окно если оно само свернулось
     static readonly Dictionary<IntPtr, DateTime> _pendingRestore = new Dictionary<IntPtr, DateTime>();
+    // Окна перемещённые нами (в течение 3 сек): если свернутся — восстановим
+    static readonly Dictionary<IntPtr, DateTime> _recentlyMoved  = new Dictionary<IntPtr, DateTime>();
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -86,6 +89,7 @@ class MonitorLock
         Hook(EVENT_OBJECT_SHOW,          EVENT_OBJECT_SHOW,          OnShow);
         Hook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, OnDragStart);
         Hook(EVENT_SYSTEM_MOVESIZEEND,   EVENT_SYSTEM_MOVESIZEEND,   OnDragEnd);
+        Hook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, OnMinimizeStart);
 
         // Запомнить уже открытые окна — не трогать их, просто зафиксировать текущий монитор
         EnumWindows((h, lp) =>
@@ -167,6 +171,16 @@ class MonitorLock
             _pendingNew[hwnd] = DateTime.UtcNow;
     }
 
+    // Окно начало сворачиваться — если мы его недавно перемещали, восстановим через 80мс
+    static void OnMinimizeStart(IntPtr hook, uint evType, IntPtr hwnd,
+        int obj, int child, uint tid, uint time)
+    {
+        DateTime movedAt;
+        if (_recentlyMoved.TryGetValue(hwnd, out movedAt))
+            if ((DateTime.UtcNow - movedAt).TotalMilliseconds < 3000)
+                _pendingRestore[hwnd] = DateTime.UtcNow;
+    }
+
     // Пользователь начал тащить окно
     static void OnDragStart(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
@@ -187,10 +201,10 @@ class MonitorLock
     {
         var now = DateTime.UtcNow;
 
-        // Проверить окна, которые могли свернуться после нашего переноса
+        // Восстановить окна, которые свернулись после нашего переноса
         var restoreReady = new List<IntPtr>();
         foreach (var kv in _pendingRestore)
-            if ((now - kv.Value).TotalMilliseconds >= 100)
+            if ((now - kv.Value).TotalMilliseconds >= 80)
                 restoreReady.Add(kv.Key);
         foreach (var h in restoreReady)
         {
@@ -198,6 +212,14 @@ class MonitorLock
             if (IsWindowVisible(h) && IsIconic(h))
                 ShowWindow(h, SW_RESTORE);
         }
+
+        // Очистить устаревшие записи _recentlyMoved (старше 3 сек)
+        var oldMoved = new List<IntPtr>();
+        foreach (var kv in _recentlyMoved)
+            if ((now - kv.Value).TotalMilliseconds >= 3000)
+                oldMoved.Add(kv.Key);
+        foreach (var h in oldMoved)
+            _recentlyMoved.Remove(h);
 
         // Обработать отложенные новые окна (ждём 150мс после появления)
         var ready = new List<IntPtr>();
@@ -253,8 +275,9 @@ class MonitorLock
         RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
             RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 
-        // Некоторые приложения (Telegram и др.) сворачиваются в ответ на SetWindowPos —
-        // ставим в очередь восстановления: через 100мс проверим и развернём если надо
+        // Запомнить что мы только что переместили это окно.
+        // Если оно свернётся (EVENT_SYSTEM_MINIMIZESTART) — восстановим его
+        _recentlyMoved[hwnd]  = DateTime.UtcNow;
         _pendingRestore[hwnd] = DateTime.UtcNow;
     }
 
