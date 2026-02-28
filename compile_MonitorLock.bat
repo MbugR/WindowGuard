@@ -28,9 +28,9 @@ if %ERRORLEVEL%==0 (
     echo  OK! MonitorLock.exe создан.
     echo  Запустите его — появится иконка в трее ^(системный лоток^).
     echo  Правой кнопкой по иконке — Выход.
+    timeout /t 3 /nobreak >nul
 ) else (
     echo.
     echo  ОШИБКА компиляции. Проверьте MonitorLock.cs.
+    pause
 )
-
-pause
