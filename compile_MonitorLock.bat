@@ -12,6 +12,9 @@ if not exist "%CSC%" (
     exit /b 1
 )
 
+:: Закрываем запущенный процесс если есть
+taskkill /f /im MonitorLock.exe >nul 2>&1
+
 :: Генерируем иконку через PowerShell (системный щит)
 echo Создаю иконку ...
 powershell -NoProfile -Command ^
