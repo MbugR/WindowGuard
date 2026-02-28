@@ -28,7 +28,8 @@ if %ERRORLEVEL%==0 (
     echo  OK! WindowGuard.exe создан.
     echo  Запустите его — появится иконка в трее ^(системный лоток^).
     echo  Правой кнопкой по иконке — Выход.
-    timeout /t 3 /nobreak >nul
+    echo  Выход через секунду.
+    timeout /t 1 /nobreak >nul
 ) else (
     echo.
     echo  ОШИБКА компиляции. Проверьте WindowGuard.cs.

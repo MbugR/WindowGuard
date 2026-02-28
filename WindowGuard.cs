@@ -30,6 +30,8 @@ class WindowGuard
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -61,9 +63,15 @@ class WindowGuard
         public uint dwFlags;
     }
 
+    const uint EVENT_OBJECT_HIDE           = 0x8001;
     const uint EVENT_OBJECT_SHOW           = 0x8002;
+    const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     const uint EVENT_SYSTEM_MOVESIZESTART  = 0x000A;
     const uint EVENT_SYSTEM_MOVESIZEEND    = 0x000B;
+    const int  VK_SHIFT                    = 0x10;
+    const int  VK_LWIN                     = 0x5B;
+    const int  VK_RWIN                     = 0x5C;
+    const int  SW_SHOWNOACTIVATE           = 4;
     const uint WINEVENT_OUTOFCONTEXT       = 0;
     const uint WINEVENT_SKIPOWNPROCESS     = 2;
     const int  GWL_STYLE                   = -16;
@@ -90,6 +98,9 @@ class WindowGuard
     static readonly HashSet<IntPtr>              _dragging   = new HashSet<IntPtr>();
     // Новые окна ждут переноса — даём приложению время инициализироваться
     static readonly Dictionary<IntPtr, DateTime> _pendingNew = new Dictionary<IntPtr, DateTime>();
+    // Окна, которые WG недавно переместил — следим, не скрылись ли они в ответ
+    static readonly Dictionary<IntPtr, DateTime> _wgMoved   = new Dictionary<IntPtr, DateTime>();
+    const int WG_MOVED_GRACE_MS = 1500;
     // Keep delegates alive so GC doesn't collect them
     static readonly List<WinEventProc> _delegates = new List<WinEventProc>();
 
@@ -111,9 +122,10 @@ class WindowGuard
 
         _primary = MonitorFromWindow(IntPtr.Zero, MONITOR_DEFAULTTOPRIMARY);
 
-        Hook(EVENT_OBJECT_SHOW,          EVENT_OBJECT_SHOW,          OnShow);
-        Hook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, OnDragStart);
-        Hook(EVENT_SYSTEM_MOVESIZEEND,   EVENT_SYSTEM_MOVESIZEEND,   OnDragEnd);
+        Hook(EVENT_OBJECT_SHOW,           EVENT_OBJECT_SHOW,           OnShow);
+        Hook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, OnLocationChange);
+        Hook(EVENT_SYSTEM_MOVESIZESTART,  EVENT_SYSTEM_MOVESIZESTART,  OnDragStart);
+        Hook(EVENT_SYSTEM_MOVESIZEEND,    EVENT_SYSTEM_MOVESIZEEND,    OnDragEnd);
 
         // Запомнить уже открытые окна — не трогать их, просто зафиксировать текущий монитор
         EnumWindows((h, lp) =>
@@ -195,6 +207,28 @@ class WindowGuard
             _pendingNew[hwnd] = DateTime.UtcNow;
     }
 
+    // Окно переместилось без drag — проверяем, не Win+Shift+Arrow ли это
+    static void OnLocationChange(IntPtr hook, uint evType, IntPtr hwnd,
+        int obj, int child, uint tid, uint time)
+    {
+        if (obj != 0 || child != 0) return;
+        if (!_approved.ContainsKey(hwnd)) return;
+        if (_dragging.Contains(hwnd)) return;
+        if (_pendingNew.ContainsKey(hwnd)) return;
+        if (!IsReal(hwnd)) return;
+
+        var newMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (newMonitor == _approved[hwnd]) return;
+
+        // Монитор сменился без drag — проверяем удерживается ли Win+Shift
+        bool winHeld   = (GetAsyncKeyState(VK_LWIN)  & 0x8000) != 0
+                      || (GetAsyncKeyState(VK_RWIN)  & 0x8000) != 0;
+        bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+        if (winHeld && shiftHeld)
+            _approved[hwnd] = newMonitor;
+    }
+
     // Пользователь начал тащить окно
     static void OnDragStart(IntPtr hook, uint evType, IntPtr hwnd,
         int obj, int child, uint tid, uint time)
@@ -234,7 +268,19 @@ class WindowGuard
         {
             IntPtr hwnd = kv.Key;
 
-            if (!IsWindowVisible(hwnd))        { dead.Add(hwnd); continue; }
+            if (!IsWindowVisible(hwnd))
+            {
+                DateTime movedAt;
+                if (_wgMoved.TryGetValue(hwnd, out movedAt) &&
+                    (now - movedAt).TotalMilliseconds < WG_MOVED_GRACE_MS)
+                {
+                    // Окно скрылось после нашего SetWindowPos — восстанавливаем
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    continue;
+                }
+                dead.Add(hwnd);
+                continue;
+            }
             if (_dragging.Contains(hwnd))      continue;
             if (_pendingNew.ContainsKey(hwnd)) continue;
             if (IsIconic(hwnd))                continue;
@@ -248,7 +294,16 @@ class WindowGuard
             _approved.Remove(h);
             _dragging.Remove(h);
             _pendingNew.Remove(h);
+            _wgMoved.Remove(h);
         }
+
+        // Чистим устаревшие записи _wgMoved
+        var expiredMoved = new List<IntPtr>();
+        foreach (var kv in _wgMoved)
+            if ((now - kv.Value).TotalMilliseconds >= WG_MOVED_GRACE_MS)
+                expiredMoved.Add(kv.Key);
+        foreach (var h in expiredMoved)
+            _wgMoved.Remove(h);
     }
 
     // Переместить окно по центру указанного монитора.
@@ -286,6 +341,7 @@ class WindowGuard
         // SWP_NOSENDCHANGING подавляет WM_WINDOWPOSCHANGING
         if (!IsIconic(hwnd))
         {
+            _wgMoved[hwnd] = DateTime.UtcNow;
             SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 
