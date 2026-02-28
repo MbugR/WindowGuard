@@ -30,7 +30,6 @@ class WindowGuard
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
-    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
 
     delegate bool EnumWndProc(IntPtr h, IntPtr lp);
 
@@ -77,8 +76,6 @@ class WindowGuard
     const uint SWP_NOZORDER               = 0x0004;
     const uint SWP_NOACTIVATE             = 0x0010;
     const uint SWP_NOSENDCHANGING         = 0x0400; // не посылать WM_WINDOWPOSCHANGING
-    const int  VK_LWIN                    = 0x5B;
-    const int  VK_RWIN                    = 0x5C;
     const uint RDW_INVALIDATE             = 0x0001;
     const uint RDW_UPDATENOW              = 0x0100;
     const uint RDW_ALLCHILDREN            = 0x0080;
@@ -231,13 +228,8 @@ class WindowGuard
                 PutOn(h, _primary);
         }
 
-        // Win-клавиша зажата — пользователь использует Win+Shift+Arrow
-        bool winKey = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
-                      (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
-
         // Проверить все известные окна на несанкционированное перемещение
-        var dead    = new List<IntPtr>();
-        var reapprove = new Dictionary<IntPtr, IntPtr>(); // окна принятые как пользовательский перенос
+        var dead = new List<IntPtr>();
         foreach (var kv in _approved)
         {
             IntPtr hwnd = kv.Key;
@@ -247,17 +239,10 @@ class WindowGuard
             if (_pendingNew.ContainsKey(hwnd)) continue;
             if (IsIconic(hwnd))                continue;
 
-            var current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-            if (current != kv.Value)
-            {
-                if (winKey)
-                    reapprove[hwnd] = current;
-                else
-                    PutOn(hwnd, kv.Value);
-            }
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != kv.Value)
+                PutOn(hwnd, kv.Value, updatePlacement: false);
         }
 
-        foreach (var kv in reapprove) _approved[kv.Key] = kv.Value;
         foreach (var h in dead)
         {
             _approved.Remove(h);
@@ -266,8 +251,10 @@ class WindowGuard
         }
     }
 
-    // Переместить окно по центру указанного монитора
-    static void PutOn(IntPtr hwnd, IntPtr monitor)
+    // Переместить окно по центру указанного монитора.
+    // updatePlacement=true для новых окон (обновляет rcNormalPosition),
+    // updatePlacement=false для возврата уже отслеживаемых (только SetWindowPos — меньше триггеров)
+    static void PutOn(IntPtr hwnd, IntPtr monitor, bool updatePlacement = true)
     {
         var mi = new MONITORINFO { cbSize = Marshal.SizeOf(typeof(MONITORINFO)) };
         if (!GetMonitorInfo(monitor, ref mi)) return;
@@ -283,16 +270,20 @@ class WindowGuard
         int x = mi.rcWork.Left + Math.Max(0, (areaW - w) / 2);
         int y = mi.rcWork.Top  + Math.Max(0, (areaH - h) / 2);
 
-        // SetWindowPlacement обновляет rcNormalPosition — позицию восстановления из свёрнутого
-        var wp = new WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
-        if (GetWindowPlacement(hwnd, ref wp))
+        // SetWindowPlacement нужен только при первом размещении — обновляет rcNormalPosition
+        // (позицию восстановления из свёрнутого). При повторных возвратах не вызываем —
+        // он внутри шлёт WM_WINDOWPOSCHANGED без SWP_NOSENDCHANGING и триггерит Telegram
+        if (updatePlacement)
         {
-            wp.rcNormalPosition = new RECT { Left = x, Top = y, Right = x + w, Bottom = y + h };
-            SetWindowPlacement(hwnd, ref wp);
+            var wp = new WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
+            if (GetWindowPlacement(hwnd, ref wp))
+            {
+                wp.rcNormalPosition = new RECT { Left = x, Top = y, Right = x + w, Bottom = y + h };
+                SetWindowPlacement(hwnd, ref wp);
+            }
         }
 
-        // SWP_NOSENDCHANGING подавляет WM_WINDOWPOSCHANGING — сообщение через которое
-        // некоторые приложения (Telegram и др.) обнаруживают программный перенос
+        // SWP_NOSENDCHANGING подавляет WM_WINDOWPOSCHANGING
         if (!IsIconic(hwnd))
         {
             SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
